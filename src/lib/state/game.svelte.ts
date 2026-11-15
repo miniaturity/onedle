@@ -1,17 +1,22 @@
-import { getDailyWord } from "./words";
-import wordsText from "./words.txt?raw";
+import { Clue } from "./clue";
+import { browser } from "$app/env";
+import { getDaily, submitGuess, type DailyPuzzle } from "./words";
 
-const WORDS = wordsText
-    .split(/\r?\n/)
-    .map((w) => w.trim())
-    .filter(Boolean); 
- 
+import wordsText from "./words.txt?raw";
+import xordsText from "./xords.txt?raw";
+
+const STORAGE_KEY = "onedle-daily-result-v1";
 const WORD_LEN = 5
 
 type Mode = "unlimited" | "daily";
 type KeyState = "gray" | "yellow" | "green" | "na";
 type Key = { c: string, col: KeyState };
-type GameStatus = "playing" | "menu" | "solved"
+type GameStatus = "playing" | "menu" | "won" | "lost" | "loading" | "error" | "submitting"
+type Saved = { number: number; guess: string; correct: boolean; answer: string };
+
+const VALID = new Set(
+	(wordsText + "\n" + xordsText).split(/\r?\n/).map((w) => w.trim().toUpperCase()).filter(Boolean)
+);
 
 
 const DEFAULT_KEYS: Key[][] = [
@@ -54,32 +59,24 @@ const DEFAULT_KEYS: Key[][] = [
 class GameState {
     public status: GameStatus = $state("menu");
 
-    private _word: string | undefined = $state();
-    private _clue: string | undefined = $state();
-    private _guess: string = $state("");
-    private _keys: Key[][] = $state([]);
-    private _timeElapsed_ms: number = $state(0);
+    word = $state<string>();
+    answer = $state<string>();
+    puzzle = $state<DailyPuzzle>();
+    guess = $state<string>("");
+    keys = $state<Key[][]>([]);
+    timeElapsed_ms = $state<number>(0);
+
+    public error: string = $state("");
+    public message: string = $state("");
+
+    public finalGuess: string = $state("");
     
-    get word(): string | undefined {
-        return this._word;
-    }
-
-    get guess(): string {
-        return this._guess;
-    }
-
-    set guess(n: string) {
-        if (n.length < WORD_LEN) {
-            this._guess = n;
-        }
-    }
-
-    get keys(): Key[][] {
-        return this._keys;
-    }
+    get done() {
+		return this.status === "won" || this.status === "lost";
+	}
 
     setKeyState(key: string, col: KeyState) {
-        this._keys = this._keys.map(j => j.map(
+        this.keys = this.keys.map(j => j.map(
             k => k.c === key ? { ...k, col } : k 
         ));
     }
@@ -93,8 +90,88 @@ class GameState {
         this.guess = "";
     }
 
+    async init() {
+		if (!browser) return;
+		this.status = "loading";
+		this.message = "";
+
+		const puzzle = await getDaily();
+		if (!puzzle) {
+			this.status = "error";
+			this.message = "Couldn't load today's puzzle.";
+			return;
+		}
+		this.puzzle = puzzle;
+
+		const saved = this.readSaved();
+		if (saved && saved.number === puzzle.number) {
+			this.finalGuess = saved.guess;
+			this.answer = saved.answer;
+			this.status = saved.correct ? "won" : "lost";
+			return;
+		}
+		this.status = "playing";
+	}
+
+    type(letter: string) {
+		if (this.status !== "playing") return;
+		if (!/^[a-z]$/i.test(letter) || this.guess.length >= WORD_LEN) return;
+		this.guess += letter.toUpperCase();
+		this.message = "";
+	}
+
+    async submit() {
+		if (this.status !== "playing" || !this.puzzle) return;
+		if (this.guess.length !== WORD_LEN) {
+			this.message = "Enter 5 letters";
+			return;
+		}
+
+		const guess = this.guess;
+		this.status = "submitting";
+		const result = await submitGuess(guess, this.puzzle.number);
+
+		if (!result) {
+			this.status = "playing";
+			this.message = "Couldn't reach the server. If it persists, reload the page.";
+			return;
+		}
+		if (!result.valid) {
+			this.status = "playing";
+			this.message = result.error;
+			return;
+		}
+
+		this.finalGuess = guess;
+		this.answer = result.answer;
+		this.status = result.correct ? "won" : "lost";
+		this.writeSaved({
+			number: this.puzzle.number,
+			guess,
+			correct: result.correct,
+			answer: result.answer
+		});
+	}
+
+    private readSaved(): Saved | undefined {
+		try {
+			const raw = localStorage.getItem(STORAGE_KEY);
+			return raw ? (JSON.parse(raw) as Saved) : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private writeSaved(s: Saved) {
+		try {
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+		} catch {
+			
+		}
+	}
+
     constructor() {
-        this._keys = DEFAULT_KEYS;
+        this.keys = DEFAULT_KEYS;
     }
 
 }
